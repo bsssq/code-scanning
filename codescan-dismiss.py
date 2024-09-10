@@ -12,7 +12,7 @@ if not github_token:
     print("ERROR: GITHUB_TOKEN environment variable is not set.")
     sys.exit(1)
 
-orgs = ['infoscout', 'MarketTrack']
+orgs = ['infoscout']
 progress_file = 'dismiss_alerts_progress.json'
 
 def get_date_4_years_ago():

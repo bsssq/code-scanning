@@ -101,12 +101,40 @@ def get_code_scanning_alerts(owner, repo):
             break
     return alerts
 
-def dismiss_alert(owner, repo, alert_number):
+def get_user_confirmation():
+    while True:
+        response = input("Do you want to dismiss the alerts for this repository? (Y/N): ").strip().lower()
+        if response in ['y', 'n']:
+            return response == 'y'
+        print("Invalid input. Please enter 'Y' or 'N'.")
+
+def get_dismissal_reason():
+    reasons = {
+        '1': 'false positive',
+        '2': 'used in tests',
+        '3': 'won\'t fix'
+    }
+    while True:
+        print("\nSelect a reason for dismissal:")
+        print("1. False positive")
+        print("2. Used in tests")
+        print("3. Won't fix")
+        choice = input("Enter the number of your choice (1-3): ").strip()
+        if choice in reasons:
+            return reasons[choice]
+        print("Invalid choice. Please enter a number between 1 and 3.")
+
+def get_dismissal_comment(reason):
+    if reason == "won't fix":
+        return input("Enter a comment for the 'Won't fix' dismissal: ").strip()
+    return ""
+
+def dismiss_alert(owner, repo, alert_number, reason, comment):
     url = f"https://api.github.com/repos/{owner}/{repo}/code-scanning/alerts/{alert_number}"
     data = {
         "state": "dismissed",
-        "dismissed_reason": "won't fix",
-        "dismissed_comment": "set to be archived"
+        "dismissed_reason": reason,
+        "dismissed_comment": comment
     }
     response = make_request(url, method='patch', data=data)
     return response is not None and response.status_code == 200
@@ -131,23 +159,24 @@ def process_repo(owner, repo):
     if last_commit_date:
         print(f"  - Days since last commit: {(current_date - last_commit_date).days} days")
     
-    four_years_ago = get_date_x_years_ago(4)
-    
-    if created_at < four_years_ago and (last_commit_date is None or last_commit_date < four_years_ago):
-        print("  - Repository is older than 4 years and last commit is older than 4 years")
-        if is_code_scanning_enabled(owner, repo):
-            alerts = get_code_scanning_alerts(owner, repo)
-            print(f"  - Found {len(alerts)} open alerts")
+    if is_code_scanning_enabled(owner, repo):
+        alerts = get_code_scanning_alerts(owner, repo)
+        print(f"  - Found {len(alerts)} open alerts")
+        
+        if alerts and get_user_confirmation():
+            reason = get_dismissal_reason()
+            comment = get_dismissal_comment(reason)
+            
             dismissed_count = 0
             for alert in alerts:
-                if dismiss_alert(owner, repo, alert['number']):
+                if dismiss_alert(owner, repo, alert['number'], reason, comment):
                     dismissed_count += 1
             print(f"  - Dismissed {dismissed_count} alerts")
             return dismissed_count
         else:
-            print("  - Code scanning is not enabled or accessible for this repository")
+            print("  - No alerts dismissed")
     else:
-        print(f"  - Repository or last commit is not older than 4 years, skipping")
+        print("  - Code scanning is not enabled or accessible for this repository")
     return 0
 
 def main():

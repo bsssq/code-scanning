@@ -35,7 +35,8 @@ def get_org_repos(org):
             new_repos = response.json()
             if not new_repos:
                 break
-            repos.extend(new_repos)
+            # Explicitly capture the 'archived' status for each repo
+            repos.extend([{**repo, 'is_archived': repo['archived']} for repo in new_repos])
             page += 1
         elif response.status_code == 403:  # rate limit hit
             reset_time = int(response.headers.get('X-RateLimit-Reset', 0)) - time.time()
@@ -104,7 +105,7 @@ def fetch_data(filter_by):
     spinner_thread.start()
 
     all_repos = {}
-    x_years_ago = get_date_x_years_ago(5)  # Example: filter for repos older than 5 years
+    x_years_ago = get_date_x_years_ago(2)  # Example: filter for repos older than 2 years
 
     for org in orgs:
         repos = get_org_repos(org)
@@ -123,19 +124,19 @@ def fetch_data(filter_by):
             if filter_by == 'Without Code Scanning' and scanning_enabled:
                 continue  # Skip if code scanning is enabled and we're filtering for not enabled
 
-            if last_push_date < x_years_ago:
-                filtered_repos.append({
-                    'name': repo_full_name,
-                    'size': repo['size'],  # in KB
-                    'last_push': repo['pushed_at'],
-                    'forks_count': repo['forks_count'],
-                    'open_issues_count': repo['open_issues_count'],
-                    'stargazers_count': repo['stargazers_count'],
-                    'contributors': get_contributors(org, repo['name']),
-                    'languages': get_language_breakdown(org, repo['name']),
-                    'scanning_enabled': scanning_enabled,
-                    'status': status
-                })
+            filtered_repos.append({
+                'name': repo_full_name,
+                'size': repo['size'],  # in KB
+                'last_push': repo['pushed_at'],
+                'forks_count': repo['forks_count'],
+                'open_issues_count': repo['open_issues_count'],
+                'stargazers_count': repo['stargazers_count'],
+                'contributors': get_contributors(org, repo['name']),
+                'languages': get_language_breakdown(org, repo['name']),
+                'scanning_enabled': scanning_enabled,
+                'status': status,
+                'is_archived': repo['is_archived']  # Use the explicitly captured 'is_archived' status
+            })
 
         all_repos[org] = filtered_repos
     
@@ -186,6 +187,7 @@ def main():
                     print(f"  - Language Breakdown: {repo_info.get('languages', {})}")
                     print(f"  - Status: {repo_info.get('status', 'Unknown')}")
                     print(f"  - Code Scanning Enabled: {repo_info.get('scanning_enabled', 'N/A')}")
+                    print(f"  - Is Archived: {repo_info['is_archived']}")  # This should now correctly display the archive status
                     print()
             else:
                 print(f"\nNo repositories in the organization {org} match the selected criteria.")

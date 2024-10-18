@@ -67,6 +67,22 @@ def get_branch_sha(org, repo, branch):
         print(f"Failed to get branch SHA. Status code: {response.status_code}")
         return None
 
+def check_branch_exists(org, repo, branch_name):
+    url = f"https://api.github.com/repos/{org}/{repo}/git/refs/heads/{branch_name}"
+    response = requests.get(url, headers=github_headers)
+    return response.status_code == 200
+
+def get_or_create_branch(org, repo, branch_name, base_branch):
+    if check_branch_exists(org, repo, branch_name):
+        print(f"Branch '{branch_name}' already exists. Using existing branch.")
+        return True
+    
+    base_sha = get_branch_sha(org, repo, base_branch)
+    if not base_sha:
+        return False
+
+    return create_github_branch(org, repo, branch_name, base_sha)
+
 def create_github_branch(org, repo, branch_name, sha):
     url = f"https://api.github.com/repos/{org}/{repo}/git/refs"
     data = {
@@ -101,47 +117,81 @@ def fetch_github_alerts(org, repo):
                 break
             page += 1
         else:
-            print(f"Failed to fetch alerts for {org}/{repo}. Status code: {response.status_code}")
+            print(f"Failed to fetch code scanning alerts for {org}/{repo}. Status code: {response.status_code}")
+            return None
+
+    return all_alerts
+
+def fetch_dependabot_alerts(org, repo):
+    all_alerts = []
+    page = 1
+    per_page = 100
+
+    while True:
+        url = f"https://api.github.com/repos/{org}/{repo}/dependabot/alerts?state=open&per_page={per_page}&page={page}"
+        response = requests.get(url, headers=github_headers)
+        response = handle_rate_limit(response)
+
+        if response.status_code == 200:
+            alerts = response.json()
+            all_alerts.extend(alerts)
+            if len(alerts) < per_page:
+                break
+            page += 1
+        else:
+            print(f"Failed to fetch Dependabot alerts for {org}/{repo}. Status code: {response.status_code}")
+            return None
+
+    return all_alerts
+
+def fetch_secret_scanning_alerts(org, repo):
+    all_alerts = []
+    page = 1
+    per_page = 100
+
+    while True:
+        url = f"https://api.github.com/repos/{org}/{repo}/secret-scanning/alerts?state=open&per_page={per_page}&page={page}"
+        response = requests.get(url, headers=github_headers)
+        response = handle_rate_limit(response)
+
+        if response.status_code == 200:
+            alerts = response.json()
+            all_alerts.extend(alerts)
+            if len(alerts) < per_page:
+                break
+            page += 1
+        else:
+            print(f"Failed to fetch secret scanning alerts for {org}/{repo}. Status code: {response.status_code}")
             return None
 
     return all_alerts
 
 def filter_alerts_by_severity(alerts, severity):
-    return [alert for alert in alerts if alert['rule'].get('security_severity_level', '').lower() in severity]
+    return [alert for alert in alerts if alert.get('rule', {}).get('security_severity_level', '').lower() in severity]
 
-def check_existing_jira_issue(jira, project_key, summary, rule_id):
-    jql_query = f'project = {project_key} AND summary ~ "\'{rule_id}\'" AND status != Closed'
+def check_existing_jira_issue(jira, project_key, summary, rule_id, parent_ticket):
+    jql_query = f'project = {project_key} AND summary ~ "\'{rule_id}\'" AND parent = {parent_ticket} AND status != Closed'
     issues = jira.search_issues(jql_query)
     return issues[0] if issues else None
 
-def map_severity_to_priority(severity):
-    priority_mapping = {
-        "critical": "Blocker",
-        "high": "Critical",
-        "medium": "Major",
-        "low": "Minor",
-        "informational": "Trivial"
-    }
-    return priority_mapping.get(severity.lower(), "Major")
-
-def create_or_update_jira_subtask(repo, alerts, group_by, parent_ticket):
-    rule_name = alerts[0]['rule']['name']
-    rule_id = alerts[0]['rule']['id']
+def create_or_update_jira_subtask(jira_project_key, repo, alerts, group_by, parent_ticket):
+    rule_name = alerts[0].get('rule', {}).get('name', 'Unknown')
+    rule_id = alerts[0].get('rule', {}).get('id', 'Unknown')
     issue_summary = f"Grouped Vulnerabilities in {repo} - '{rule_id}'"
 
-    existing_issue = check_existing_jira_issue(jira, jira_project_key, issue_summary, rule_id)
+    existing_issue = check_existing_jira_issue(jira, jira_project_key, issue_summary, rule_id, parent_ticket)
 
     if existing_issue:
-        print(f"Existing Jira issue found: {jira_url}/browse/{existing_issue.key}")
+        print(f"Existing Jira issue found under parent {parent_ticket}: {jira_url}/browse/{existing_issue.key}")
         return existing_issue
 
     alert_details = "\n".join([
-        f"- {alert['rule']['name']}: {alert['rule']['description']}\n  "
-        f"Location: {alert['html_url']}"
+        f"- {alert.get('rule', {}).get('name', 'Unknown')}: {alert.get('rule', {}).get('description', 'No description')}\n  "
+        f"Location: {alert.get('html_url', 'No URL')}"
         for alert in alerts
     ])
 
-    severity = alerts[0]['rule'].get('security_severity_level', alerts[0]['rule'].get('severity', 'Medium')).lower()
+    severity = alerts[0].get('rule', {}).get('security_severity_level', 'Medium').lower()
     priority = map_severity_to_priority(severity)
 
     issue_dict = {
@@ -162,8 +212,18 @@ def create_or_update_jira_subtask(repo, alerts, group_by, parent_ticket):
         print(f"Failed to create Jira sub-task. Error: {str(e)}")
         return None
 
+def map_severity_to_priority(severity):
+    priority_mapping = {
+        "critical": "Blocker",
+        "high": "Critical",
+        "medium": "Major",
+        "low": "Minor",
+        "informational": "Trivial"
+    }
+    return priority_mapping.get(severity.lower(), "Major")
+
+
 def create_commit(org, repo, branch, message, content):
-    # Get the latest commit SHA
     url = f"https://api.github.com/repos/{org}/{repo}/git/refs/heads/{branch}"
     response = requests.get(url, headers=github_headers)
     if response.status_code != 200:
@@ -171,7 +231,6 @@ def create_commit(org, repo, branch, message, content):
         return None
     sha = response.json()['object']['sha']
 
-    # Create a new blob
     blob_url = f"https://api.github.com/repos/{org}/{repo}/git/blobs"
     blob_data = {
         "content": content,
@@ -183,7 +242,6 @@ def create_commit(org, repo, branch, message, content):
         return None
     blob_sha = blob_response.json()['sha']
 
-    # Create a new tree
     tree_url = f"https://api.github.com/repos/{org}/{repo}/git/trees"
     tree_data = {
         "base_tree": sha,
@@ -202,7 +260,6 @@ def create_commit(org, repo, branch, message, content):
         return None
     tree_sha = tree_response.json()['sha']
 
-    # Create a new commit
     commit_url = f"https://api.github.com/repos/{org}/{repo}/git/commits"
     commit_data = {
         "message": message,
@@ -215,7 +272,6 @@ def create_commit(org, repo, branch, message, content):
         return None
     new_commit_sha = commit_response.json()['sha']
 
-    # Update the reference
     ref_url = f"https://api.github.com/repos/{org}/{repo}/git/refs/heads/{branch}"
     ref_data = {
         "sha": new_commit_sha
@@ -227,24 +283,6 @@ def create_commit(org, repo, branch, message, content):
 
     print(f"Commit created successfully in branch {branch}")
     return new_commit_sha
-
-def check_branch_exists(org, repo, branch_name):
-    url = f"https://api.github.com/repos/{org}/{repo}/git/refs/heads/{branch_name}"
-    response = requests.get(url, headers=github_headers)
-    return response.status_code == 200
-
-def get_or_create_branch(org, repo, branch_name, base_branch):
-    if check_branch_exists(org, repo, branch_name):
-        print(f"Branch '{branch_name}' already exists. Using existing branch.")
-        return True
-    
-    base_sha = get_branch_sha(org, repo, base_branch)
-    if not base_sha:
-        return False
-
-    return create_github_branch(org, repo, branch_name, base_sha)
-
-
 
 def create_github_pr(org, repo, branch_name, pr_title, pr_body):
     permissions = check_repo_permissions(org, repo)
@@ -266,7 +304,6 @@ def create_github_pr(org, repo, branch_name, pr_title, pr_body):
         print("Failed to create commit. Cannot create PR.")
         return None
 
-    # Check if PR already exists
     existing_pr = check_existing_pr(org, repo, branch_name, default_branch)
     if existing_pr:
         print(f"PR already exists: {existing_pr}")
@@ -311,7 +348,7 @@ def group_alerts(alerts, group_by):
     grouped_alerts = {}
     for alert in alerts:
         if group_by == "rule":
-            group_key = alert['rule']['id']
+            group_key = alert.get('rule', {}).get('id', 'Unknown')
         
         if group_key not in grouped_alerts:
             grouped_alerts[group_key] = []
@@ -319,56 +356,66 @@ def group_alerts(alerts, group_by):
     return grouped_alerts
 
 def process_vulnerabilities(org, repo, jira_project_key, parent_ticket):
-    alerts = fetch_github_alerts(org, repo)
+    code_scanning_alerts = fetch_github_alerts(org, repo)
+    dependabot_alerts = fetch_dependabot_alerts(org, repo)
+    secret_scanning_alerts = fetch_secret_scanning_alerts(org, repo)
 
-    if alerts:
-        severity_choice = input("Which severity do you want to look at? (1: critical, 2: high, 3: both): ")
-        if severity_choice == "1":
-            severity = ["critical"]
-        elif severity_choice == "2":
-            severity = ["high"]
-        elif severity_choice == "3":
-            severity = ["critical", "high"]
-        else:
-            print("Invalid choice. Exiting.")
-            return
+    all_alerts = []
+    if code_scanning_alerts:
+        all_alerts.extend(code_scanning_alerts)
+    if dependabot_alerts:
+        all_alerts.extend(dependabot_alerts)
+    if secret_scanning_alerts:
+        all_alerts.extend(secret_scanning_alerts)
 
-        filtered_alerts = filter_alerts_by_severity(alerts, severity)
+    if not all_alerts:
+        print("No alerts found.")
+        return
 
-        if not filtered_alerts:
-            print("No alerts found for the selected severity.")
-            return
+    severity_choice = input("Which severity do you want to look at? (1: critical, 2: high, 3: both): ")
+    if severity_choice == "1":
+        severity = ["critical"]
+    elif severity_choice == "2":
+        severity = ["high"]
+    elif severity_choice == "3":
+        severity = ["critical", "high"]
+    else:
+        print("Invalid choice. Exiting.")
+        return
 
-        grouped_alerts = group_alerts(filtered_alerts, "rule")
-        rules = list(grouped_alerts.keys())
+    filtered_alerts = filter_alerts_by_severity(all_alerts, severity)
 
-        print("Available rules:")
-        for idx, rule in enumerate(rules, start=1):
-            rule_name = grouped_alerts[rule][0]['rule']['name']
-            rule_severity = grouped_alerts[rule][0]['rule']['security_severity_level']
-            print(f"{idx}. {rule_name} ({len(grouped_alerts[rule])} vulnerabilities, Severity: {rule_severity})")
+    if not filtered_alerts:
+        print("No alerts found for the selected severity.")
+        return
 
-        rule_choice_idx = int(input("Select the rule you want to process (enter number): ")) - 1
-        if rule_choice_idx < 0 or rule_choice_idx >= len(rules):
-            print("Invalid selection. Exiting.")
-            return
-        selected_rule = rules[rule_choice_idx]
+    grouped_alerts = group_alerts(filtered_alerts, "rule")
+    rules = list(grouped_alerts.keys())
 
+    print("Available rules:")
+    for idx, rule in enumerate(rules, start=1):
+        rule_name = grouped_alerts[rule][0].get('rule', {}).get('name', 'Unknown')
+        rule_severity = grouped_alerts[rule][0].get('rule', {}).get('security_severity_level', 'Unknown')
+        print(f"{idx}. {rule_name} ({len(grouped_alerts[rule])} vulnerabilities, Severity: {rule_severity})")
+
+    rule_choices = input("Select the rules you want to process (enter numbers separated by commas): ").split(',')
+    selected_rules = [rules[int(choice.strip()) - 1] for choice in rule_choices if choice.strip().isdigit() and 0 < int(choice.strip()) <= len(rules)]
+
+    for selected_rule in selected_rules:
         selected_alerts = grouped_alerts[selected_rule]
-
-        rule_name = selected_alerts[0]['rule']['name']
-        print(f"\nSelected Rule: {rule_name}")
+        rule_name = selected_alerts[0].get('rule', {}).get('name', 'Unknown')
+        print(f"\nProcessing Rule: {rule_name}")
         print(f"Number of vulnerabilities: {len(selected_alerts)}")
 
-        jira_issue = create_or_update_jira_subtask(repo, selected_alerts, "rule", parent_ticket)
+        jira_issue = create_or_update_jira_subtask(jira_project_key, repo, selected_alerts, "rule", parent_ticket)
         if not jira_issue:
             print("Failed to create or update Jira issue.")
-            return
+            continue
 
         branch_name = f"fix/{rule_name.replace(' ', '-').lower()}"
         pr_title = f"Fix {rule_name} vulnerabilities in {repo}"
         pr_body = f"Fixes the following vulnerabilities in {repo}:\n\n" + "\n".join(
-            [f"- {alert['rule']['name']} in {alert['most_recent_instance']['location']['path']}" for alert in selected_alerts]
+            [f"- {alert.get('rule', {}).get('name', 'Unknown')} in {alert.get('most_recent_instance', {}).get('location', {}).get('path', 'Unknown')}" for alert in selected_alerts]
         )
 
         pr_url = create_github_pr(org, repo, branch_name, pr_title, pr_body)

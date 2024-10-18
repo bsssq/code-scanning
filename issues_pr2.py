@@ -9,10 +9,6 @@ github_token = os.getenv('GITHUB_TOKEN')
 jira_url = os.getenv('JIRA_URL')
 jira_email = os.getenv('JIRA_EMAIL')
 jira_api_token = os.getenv('JIRA_API_TOKEN')
-jira_project_key = 'LINK'
-jira_parent_ticket = 'LINK-3654'
-org = 'information-machine'
-repo = 'numerator-link'
 
 # Check for environment variables
 if not all([github_token, jira_email, jira_api_token, jira_url]):
@@ -322,7 +318,7 @@ def group_alerts(alerts, group_by):
         grouped_alerts[group_key].append(alert)
     return grouped_alerts
 
-def process_vulnerabilities(org, repo, group_by, parent_ticket):
+def process_vulnerabilities(org, repo, jira_project_key, parent_ticket):
     alerts = fetch_github_alerts(org, repo)
 
     if alerts:
@@ -343,7 +339,7 @@ def process_vulnerabilities(org, repo, group_by, parent_ticket):
             print("No alerts found for the selected severity.")
             return
 
-        grouped_alerts = group_alerts(filtered_alerts, group_by)
+        grouped_alerts = group_alerts(filtered_alerts, "rule")
         rules = list(grouped_alerts.keys())
 
         print("Available rules:")
@@ -364,7 +360,7 @@ def process_vulnerabilities(org, repo, group_by, parent_ticket):
         print(f"\nSelected Rule: {rule_name}")
         print(f"Number of vulnerabilities: {len(selected_alerts)}")
 
-        jira_issue = create_or_update_jira_subtask(repo, selected_alerts, group_by, parent_ticket)
+        jira_issue = create_or_update_jira_subtask(repo, selected_alerts, "rule", parent_ticket)
         if not jira_issue:
             print("Failed to create or update Jira issue.")
             return
@@ -385,4 +381,9 @@ def process_vulnerabilities(org, repo, group_by, parent_ticket):
             print("Failed to create GitHub PR.")
 
 if __name__ == "__main__":
-    process_vulnerabilities(org, repo, group_by="rule", parent_ticket=jira_parent_ticket)
+    org = input("Enter the GitHub organization name: ")
+    repo = input("Enter the GitHub repository name: ")
+    jira_project_key = input("Enter the JIRA project key: ")
+    parent_ticket = input("Enter the parent ticket key: ")
+
+    process_vulnerabilities(org, repo, jira_project_key, parent_ticket)
